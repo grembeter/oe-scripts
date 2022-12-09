@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (C) grembeter@outlook.com
+
+set -o xtrace
+set -o errexit   # exit immediately if a command exits with a non-zero status
+set -o nounset   # treat unset variables as an error when substituting
+
+##################################################
+#
+# clone git repo
+#
+##################################################
+git_clone() {
+    local uri="$1"
+    local ref="$2"
+
+    git clone "$uri"
+    git -C $(basename "$uri") checkout -b oci "$ref"
+}
+
+##################################################
+#
+# main entry
+#
+##################################################
+build_image() {
+    mkdir layers/
+    cd -P layers/
+    git_clone https://git.openembedded.org/bitbake 51cf7cf12d23b757aa49f428a256fb3d3c865f6d
+    git_clone https://git.openembedded.org/openembedded-core 34afdd0bf5e2810d440bcd378ba1023159c2b2d0
+    git_clone https://git.openembedded.org/meta-openembedded 8c58f419c299fe3764482ebe4f366e25533ea23f
+    git_clone https://git.yoctoproject.org/meta-virtualization cb5dfda6f6d862a575f029ee8ded0bc3db6bc766
+    git_clone https://github.com/agherzan/meta-raspberrypi 4946b8d538bc2ec4a9823b23b1b4f28c2d60ac81
+
+    sed -r -e 's/^.*%%% ?//' <<BB > meta-raspberrypi/recipes-core/images/oci-test-image.bb
+    %%% #
+    %%% inherit image
+    %%% IMAGE_LINGUAS = ""
+    %%% NO_RECOMMENDATION = "1"
+    %%% IMAGE_FEATURES = ""
+    %%% ROOTFS_BOOTSTRAP_INSTALL = ""
+    %%% LICENSE = "MIT"
+    %%% LIC_FILES_CHECKSUM = "file://${COMMON_LINCENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302
+    %%%
+    %%% IMAGE_INSTALL += "bash python3"
+BB
+
+    rm -rf ../build
+
+    set +o nounset
+    . ./openembedded-core/oe-init-build-env ../build
+    set -o nounset
+
+    bitbake-layers add-layer ../layers/meta-openembedded/meta-oe
+    bitbake-layers add-layer ../layers/meta-openembedded/meta-networking
+    bitbake-layers add-layer ../layers/meta-openembedded/meta-filesystems
+    bitbake-layers add-layer ../layers/meta-openembedded/meta-python
+    bitbake-layers add-layer ../layers/meta-virtualization
+    bitbake-layers add-layer ../layers/meta-raspberrypi
+    bitbake-layers show-layers
+
+    sed -r -e 's/^.*%%% ?//' <<CONF >> conf/local.conf
+    %%% #
+    %%% MACHINE = "raspberrypi4-64"
+    %%% DISTRO_FEATURES:append = " virtualization"
+    %%% INIT_MANAGER = "systemd"
+    %%% TCLIBCAPPEND = ""
+    %%% IMAGE_INSTALL:append = " containerd-opencontainers runc-opencontainers"
+    %%% IMAGE_FEATURES:append = " debug-tweaks ssh-server-openssh"
+    %%% hostname:pn-base-files = "rpi64-oci"
+CONF
+    bitbake core-image-minimal oci-test-image
+    ls -l "$BUILDDIR"/tmp/deploy/images/*/
+
+    sed -r -e 's/^.*%%% ?//' <<README
+    %%% ################## Next steps #####################
+    %%% 1. burn wic image to sd card
+    %%%    bmaptool copy "$BUILDDIR"/tmp/deploy/images/raspberrypi4-64/core-image-minimal-raspberrypi4-64.wic.bz2 /dev/XXX
+    %%%
+    %%% 2. boot RPi and copy oci image on the target
+    %%%    scp "$BUILDDIR"/tmp/deploy/images/raspberrypi4-64/oci-test-image-raspberrypi4-64.tar.bz2 root@rpi64-oci:/oci-test-image.tar.bz2
+    %%%    ssh root@rpi64-oci rm -rf /tmp/oci/
+    %%%    ssh root@rpi64-oci mkdir -p /tmp/oci/rootfs/
+    %%%    ssh root@rpi64-oci tar xf /oci-test-image.tar.bz2 -C /tmp/oci/rootfs
+    %%%    ssh root@rpi64-oci sh -c "cd /tmp/oci && runc spec"
+    %%%    ssh root@rpi64-oci sh -c "cd /tmp/oci && runc run ocid"
+    %%%
+    %%% 3. run container
+    %%%    ssh root@rpi64-oci
+    %%%    root@rpi64-oci:~# cd /tmp/oci
+    %%%    root@rpi64-oci:~# runc run ocid
+    %%%    sh-5.2# python3 --version
+    %%%    Python 3.11.0
+README
+}
+
+build_image "$@"
